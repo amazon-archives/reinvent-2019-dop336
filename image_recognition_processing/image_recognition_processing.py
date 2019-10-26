@@ -4,6 +4,7 @@ from aws_cdk import (
     core,
     aws_s3 as s3,
     aws_dynamodb as dynamodb,
+    aws_iam as iam,
     aws_lambda as lbda,
     aws_lambda_event_sources as event_sources,
     aws_stepfunctions as sfn,
@@ -86,6 +87,7 @@ class ImageRecognitionProcessingStack(core.Stack):
             },
             memory_size=256
         )
+        # Trigger process when the bucket is written to
         start_execution_fn.add_event_source(
             event_sources.S3EventSource(
                 photo_repo,
@@ -93,6 +95,8 @@ class ImageRecognitionProcessingStack(core.Stack):
                     s3.EventType.OBJECT_CREATED
                 ]
             ))
+        # Allow start-processing function to write to image metadata table
+        image_metadata_table.grant_write_data(start_execution_fn)
 
         # Function to extract image metadata
         extract_metadata_fn = lbda.Function(
@@ -105,6 +109,8 @@ class ImageRecognitionProcessingStack(core.Stack):
             memory_size=1024,
             timeout=core.Duration.seconds(200)
         )
+        # Allow extraction function to get photos
+        photo_repo.grant_read(extract_metadata_fn)
 
         # Function to transform image metadata
         transform_metadata_fn = lbda.Function(
@@ -132,6 +138,8 @@ class ImageRecognitionProcessingStack(core.Stack):
             memory_size=256,
             timeout=core.Duration.seconds(60)
         )
+        photo_repo.grant_read(store_metadata_fn)
+        image_metadata_table.grant_write_data(store_metadata_fn)
 
         # Invoke Rekognition to detect labels
         detect_labels_fn = lbda.Function(
@@ -143,6 +151,13 @@ class ImageRecognitionProcessingStack(core.Stack):
             runtime=lbda.Runtime.NODEJS_8_10,
             memory_size=256,
             timeout=core.Duration.seconds(60)
+        )
+        detect_labels_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=['rekognition:DetectLabels'],
+                resources=['*']
+            )
         )
 
         # Generate thumbnails
@@ -156,6 +171,7 @@ class ImageRecognitionProcessingStack(core.Stack):
             memory_size=1536,
             timeout=core.Duration.minutes(5)
         )
+        photo_repo.grant_read_write(generate_thumbnails_fn)
 
         # State machine
         not_supported_image_type = sfn.Fail(
@@ -251,4 +267,4 @@ class ImageRecognitionProcessingStack(core.Stack):
                         parallel_processing).next(store_metadata_task)
                 ).otherwise(not_supported_image_type)
             )
-        )
+        ).grant_start_execution(start_execution_fn)
