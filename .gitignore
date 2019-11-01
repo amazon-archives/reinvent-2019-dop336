@@ -4,3 +4,4 @@ __pycache__
 .vscode
 cdk.out
 .env
+node_modules/

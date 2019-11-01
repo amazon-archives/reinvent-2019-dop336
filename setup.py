@@ -24,7 +24,10 @@ setuptools.setup(
         "aws-cdk.aws-dynamodb",
         "aws-cdk.aws-lambda",
         "aws-cdk.aws-stepfunctions",
-        "aws-cdk.aws-stepfunctions-tasks"
+        "aws-cdk.aws-stepfunctions-tasks",
+        "aws-cdk.aws-ecs-patterns",
+        "aws-cdk.aws-ecr-assets",
+        "aws-cdk.aws-cognito"
     ],
 
     python_requires=">=3.6",

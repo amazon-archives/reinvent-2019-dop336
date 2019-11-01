@@ -1,12 +1,18 @@
 import os.path
+import subprocess
+from state_machine import IdentifierStateMachine
 
 from aws_cdk import (
     core,
-    aws_s3 as s3,
+    aws_cognito as cognito,
     aws_dynamodb as dynamodb,
+    aws_ecs as ecs,
+    aws_ecs_patterns as ecs_patterns,
+    aws_ecr_assets as ecr_assets,
     aws_iam as iam,
     aws_lambda as lbda,
     aws_lambda_event_sources as event_sources,
+    aws_s3 as s3,
     aws_stepfunctions as sfn,
     aws_stepfunctions_tasks as tasks
 )
@@ -48,7 +54,7 @@ class ImageRecognitionProcessingStack(core.Stack):
             partition_key=dynamodb.Attribute(
                 name='albumID', type=dynamodb.AttributeType.STRING),
             sort_key=dynamodb.Attribute(
-                name='uploadTIme', type=dynamodb.AttributeType.NUMBER),
+                name='uploadTime', type=dynamodb.AttributeType.NUMBER),
             projection_type=dynamodb.ProjectionType.ALL,
             read_capacity=3,
             write_capacity=3
@@ -74,6 +80,28 @@ class ImageRecognitionProcessingStack(core.Stack):
             write_capacity=1
         )
 
+        extract_image_metadata_fn_dir = os.path.join(
+            os.path.dirname(__file__), 'extract-image-metadata')
+        detect_labels_fn_dir = os.path.join(
+            os.path.dirname(__file__), 'rekognition')
+        generate_thumbnails_fn_dir = os.path.join(
+            os.path.dirname(__file__), 'thumbnail')
+
+        for dir in (
+            extract_image_metadata_fn_dir,
+            detect_labels_fn_dir,
+            generate_thumbnails_fn_dir
+        ):
+            # Prepare npm package
+            subprocess.check_call(["npm", "install"], cwd=dir)
+
+        state_machine = IdentifierStateMachine(
+            self,
+            'StateMachine',
+            photo_repo=photo_repo,
+            image_metadata_table=image_metadata_table
+        ).state_machine
+
         # Function to start image processing
         start_execution_fn = lbda.Function(
             self, 'StartExecution',
@@ -83,10 +111,12 @@ class ImageRecognitionProcessingStack(core.Stack):
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
             environment={
+                'STATE_MACHINE_ARN': state_machine.state_machine_arn,
                 'IMAGE_METADATA_DDB_TABLE': image_metadata_table.table_name
             },
             memory_size=256
         )
+
         # Trigger process when the bucket is written to
         start_execution_fn.add_event_source(
             event_sources.S3EventSource(
@@ -98,173 +128,101 @@ class ImageRecognitionProcessingStack(core.Stack):
         # Allow start-processing function to write to image metadata table
         image_metadata_table.grant_write_data(start_execution_fn)
 
-        # Function to extract image metadata
-        extract_metadata_fn = lbda.Function(
-            self, 'ExtractImageMetadata',
-            description='Extract image metadata such as format, size, geolocation, etc.',
+        # Allow start-processing function to invoke state machine
+        state_machine.grant_start_execution(start_execution_fn)
+
+        describe_execution_function = lbda.Function(
+            self, 'DescribeExecutionFunction',
             code=lbda.AssetCode(os.path.join(
-                os.path.dirname(__file__), 'extract-image-metadata')),
+                os.path.join(os.path.dirname(__file__),
+                             'state-machine-describe-execution')
+            )),
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
             memory_size=1024,
             timeout=core.Duration.seconds(200)
         )
-        # Allow extraction function to get photos
-        photo_repo.grant_read(extract_metadata_fn)
-
-        # Function to transform image metadata
-        transform_metadata_fn = lbda.Function(
-            self, 'TransformImageMetadata',
-            description='massages JSON of extracted image metadata',
-            code=lbda.AssetCode(os.path.join(
-                os.path.dirname(__file__), 'transform-metadata')),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            memory_size=256,
-            timeout=core.Duration.seconds(60)
-        )
-
-        # Function to store metadata in database
-        store_metadata_fn = lbda.Function(
-            self, 'StoreImageMetadata',
-            description='Store image metadata into database',
-            code=lbda.AssetCode(os.path.join(
-                os.path.dirname(__file__), 'store-image-metadata')),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            environment={
-                'IMAGE_METADATA_DDB_TABLE': image_metadata_table.table_name
-            },
-            memory_size=256,
-            timeout=core.Duration.seconds(60)
-        )
-        photo_repo.grant_read(store_metadata_fn)
-        image_metadata_table.grant_write_data(store_metadata_fn)
-
-        # Invoke Rekognition to detect labels
-        detect_labels_fn = lbda.Function(
-            self, 'DetectLabels',
-            description='Use Amazon Rekognition to detect labels from image',
-            code=lbda.AssetCode(os.path.join(
-                os.path.dirname(__file__), 'rekognition')),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            memory_size=256,
-            timeout=core.Duration.seconds(60)
-        )
-        detect_labels_fn.add_to_role_policy(
+        describe_execution_function.add_to_role_policy(
             iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=['rekognition:DetectLabels'],
-                resources=['*']
+                actions=['states:DescribeExecution'],
+                resources=[
+                    self.format_arn(
+                        service='states',
+                        resource='execution:' + state_machine.state_machine_name,
+                        resource_name='*',
+                        sep=':'
+                    )
+                ]
             )
         )
 
-        # Generate thumbnails
-        generate_thumbnails_fn = lbda.Function(
-            self, 'GenerateThumbnails',
-            description='Generate thumbnails for images',
-            code=lbda.AssetCode(os.path.join(
-                os.path.dirname(__file__), 'thumbnail')),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            memory_size=1536,
-            timeout=core.Duration.minutes(5)
-        )
-        photo_repo.grant_read_write(generate_thumbnails_fn)
-
-        # State machine
-        not_supported_image_type = sfn.Fail(
-            self, 'NotSupportedImageType',
-            comment='Unsupported image type'
-        )
-
-        extract_metadata_task = sfn.Task(
-            self, 'ExtractMetadataTask',
-            task=tasks.RunLambdaTask(
-                extract_metadata_fn),
-            comment='Extract Image Metadata',
-            result_path='$.extractedMetadata'
-        ).add_catch(
-            errors=['ImageIdentifyError'],
-            handler=not_supported_image_type
-        ).add_retry(
-            errors=['ImageIdentifyError'],
-            max_attempts=0
-        ).add_retry(
-            errors=['States.ALL'],
-            interval=core.Duration.seconds(1),
-            max_attempts=2,
-            backoff_rate=1.5
-        )
-
-        transform_metadata_task = sfn.Task(
-            self, 'TransformMetadataTask',
-            task=tasks.RunLambdaTask(transform_metadata_fn),
-            comment='Transform metadata',
-            input_path='$.extractedMetadata',
-            result_path='$.extractedMetadata'
-        ).add_retry(
-            errors=['States.ALL'],
-            interval=core.Duration.seconds(1),
-            max_attempts=2,
-            backoff_rate=1.5
-        )
-
-        detect_labels_task = sfn.Task(
-            self, 'DetectLabelsTask',
-            task=tasks.RunLambdaTask(detect_labels_fn),
-        ).add_retry(
-            errors=['States.ALL'],
-            interval=core.Duration.seconds(1),
-            max_attempts=2,
-            backoff_rate=1.5
-        )
-
-        generate_thumbnails_task = sfn.Task(
-            self, 'GenerateThumbnailsTask',
-            task=tasks.RunLambdaTask(generate_thumbnails_fn),
-        ).add_retry(
-            errors=['States.ALL'],
-            interval=core.Duration.seconds(1),
-            max_attempts=2,
-            backoff_rate=1.5
-        )
-
-        store_metadata_task = sfn.Task(
-            self, 'StoreMetadataTask',
-            task=tasks.RunLambdaTask(store_metadata_fn),
-            result_path='$.storeResult'
-        ).add_retry(
-            errors=['States.ALL'],
-            interval=core.Duration.seconds(1),
-            max_attempts=2,
-            backoff_rate=1.5
-        )
-
-        parallel_processing = sfn.Parallel(
-            self, 'ParallelProcessing',
-            result_path='$.parallelResults'
-        )
-        parallel_processing.branch(
-            detect_labels_task, generate_thumbnails_task
-        )
-
-        sfn.StateMachine(
-            self, 'StateMachine',
-            definition=extract_metadata_task.next(
-                sfn.Choice(
-                    self, 'ImageTypeCheck',
-                    comment='Check Image Type',
-                ).when(
-                    sfn.Condition.or_(
-                        sfn.Condition.string_equals(
-                            '$.extractedMetadata.format', 'JPEG'),
-                        sfn.Condition.string_equals(
-                            '$.extractedMetadata.format', 'PNG')
-                    ),
-                    transform_metadata_task.next(
-                        parallel_processing).next(store_metadata_task)
-                ).otherwise(not_supported_image_type)
+        identity_pool_role = iam.Role(
+            self, 'IdentityPoolRole',
+            assumed_by=iam.FederatedPrincipal(
+                'cognito-identity.amazonaws.com',
+                {},
+                'sts:AssumeRoleWithWebIdentity'
             )
-        ).grant_start_execution(start_execution_fn)
+        )
+
+        identity_pool_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=['states:DescribeExecution'],
+                resources=[
+                    self.format_arn(
+                        service='states',
+                        resource='execution:' + state_machine.state_machine_name,
+                        resource_name='*',
+                        sep=':'
+                    )
+                ]
+            )
+        )
+
+        photo_repo.grant_read_write(identity_pool_role)
+        album_metadata_table.grant_read_write_data(identity_pool_role)
+        image_metadata_table.grant_read_write_data(identity_pool_role)
+        describe_execution_function.grant_invoke(identity_pool_role)
+
+        identity_pool = cognito.CfnIdentityPool(
+            self, 'IdentityPool',
+            allow_unauthenticated_identities=True
+        )
+        core.CfnOutput(self, 'identity_pool_id', value=identity_pool.ref)
+        cognito.CfnIdentityPoolRoleAttachment(
+            self, 'IdentityPoolRoleAttachment',
+            identity_pool_id=identity_pool.ref,
+            roles={
+                'authenticated': identity_pool_role.role_arn,
+                'unauthenticated': identity_pool_role.role_arn
+            }
+        )
+
+        # Our web app
+        app = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self, 'WebService',
+            assign_public_ip=True,
+            cpu=256,
+            memory_limit_mib=512,
+            desired_count=2,
+            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+                image=ecs.ContainerImage.from_asset(
+                    os.path.join(os.path.dirname(__file__), 'webapp')
+                ),
+                container_port=80,
+                environment={
+                    'ALBUM_METADATA_TABLE': album_metadata_table.table_name,
+                    'COGNITO_IDENTITY_POOL': identity_pool.ref,
+                    'IMAGE_METADATA_TABLE': image_metadata_table.table_name,
+                    'PHOTO_REPO_S3_BUCKET': photo_repo.bucket_name,
+                    'DESCRIBE_EXECUTION_FUNCTION_NAME': describe_execution_function.function_name
+                }
+            )
+        )
+
+        app.task_definition.add_to_task_role_policy(
+            iam.PolicyStatement(
+                actions=['lambda:InvokeFunction'],
+                resources=[start_execution_fn.function_arn]
+            )
+        )
