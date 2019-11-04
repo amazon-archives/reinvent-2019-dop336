@@ -1,14 +1,17 @@
 import os.path
+import subprocess
 
 from aws_cdk import (
     core,
     aws_dynamodb as dynamodb,
     aws_lambda as lbda,
+    aws_lambda_event_sources as event_sources,
     aws_iam as iam,
     aws_s3 as s3,
     aws_stepfunctions as sfn,
     aws_stepfunctions_tasks as tasks
 )
+
 
 class IdentifierStateMachine(core.Construct):
     def __init__(self, scope: core.Construct, id: str, photo_repo: s3.Bucket, image_metadata_table: dynamodb.Table) -> None:
@@ -21,11 +24,19 @@ class IdentifierStateMachine(core.Construct):
         generate_thumbnails_fn_dir = os.path.join(
             os.path.dirname(__file__), 'thumbnail')
 
+        for dir in (
+            extract_image_metadata_fn_dir,
+            detect_labels_fn_dir,
+            generate_thumbnails_fn_dir
+        ):
+            # Prepare npm package
+            subprocess.check_call(["npm", "install"], cwd=dir)
+
         # Function to extract image metadata
         extract_metadata_fn = lbda.Function(
             self, 'ExtractImageMetadata',
             description='Extract image metadata such as format, size, geolocation, etc.',
-            code=lbda.AssetCode(extract_image_metadata_fn_dir),
+            code=lbda.Code.from_asset(extract_image_metadata_fn_dir),
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
             memory_size=1024,
@@ -38,7 +49,7 @@ class IdentifierStateMachine(core.Construct):
         transform_metadata_fn = lbda.Function(
             self, 'TransformImageMetadata',
             description='massages JSON of extracted image metadata',
-            code=lbda.AssetCode(os.path.join(
+            code=lbda.Code.from_asset(os.path.join(
                 os.path.dirname(__file__), 'transform-metadata')),
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
@@ -50,7 +61,7 @@ class IdentifierStateMachine(core.Construct):
         store_metadata_fn = lbda.Function(
             self, 'StoreImageMetadata',
             description='Store image metadata into database',
-            code=lbda.AssetCode(os.path.join(
+            code=lbda.Code.from_asset(os.path.join(
                 os.path.dirname(__file__), 'store-image-metadata')),
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
@@ -67,7 +78,7 @@ class IdentifierStateMachine(core.Construct):
         detect_labels_fn = lbda.Function(
             self, 'DetectLabels',
             description='Use Amazon Rekognition to detect labels from image',
-            code=lbda.AssetCode(detect_labels_fn_dir),
+            code=lbda.Code.from_asset(detect_labels_fn_dir),
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
             memory_size=256,
@@ -85,7 +96,7 @@ class IdentifierStateMachine(core.Construct):
         generate_thumbnails_fn = lbda.Function(
             self, 'GenerateThumbnails',
             description='Generate thumbnails for images',
-            code=lbda.AssetCode(generate_thumbnails_fn_dir),
+            code=lbda.Code.from_asset(generate_thumbnails_fn_dir),
             handler='index.handler',
             runtime=lbda.Runtime.NODEJS_8_10,
             memory_size=1536,
@@ -185,4 +196,72 @@ class IdentifierStateMachine(core.Construct):
                         parallel_processing).next(store_metadata_task)
                 ).otherwise(not_supported_image_type)
             )
+        )
+
+       # Function to start image processing
+        self.start_execution_fn = lbda.Function(
+            self, 'StartExecution',
+            description='Triggered by S3 image upload to the repo bucket and start the image processing step function workflow',
+            code=lbda.Code.from_asset(os.path.join(
+                os.path.dirname(__file__), 'start-execution')),
+            handler='index.handler',
+            runtime=lbda.Runtime.NODEJS_8_10,
+            environment={
+                'STATE_MACHINE_ARN': self.state_machine.state_machine_arn,
+                'IMAGE_METADATA_DDB_TABLE': image_metadata_table.table_name
+            },
+            memory_size=256
+        )
+
+        # Trigger process when the bucket is written to
+        self.start_execution_fn.add_event_source(
+            event_sources.S3EventSource(
+                photo_repo,
+                events=[
+                    s3.EventType.OBJECT_CREATED
+                ]
+            ))
+        # Allow start-processing function to write to image metadata table
+        image_metadata_table.grant_write_data(self.start_execution_fn)
+
+        # Allow start-processing function to invoke state machine
+        self.state_machine.grant_start_execution(self.start_execution_fn)
+
+        self.describe_execution_function = lbda.Function(
+            self, 'DescribeExecutionFunction',
+            code=lbda.Code.from_asset(os.path.join(
+                os.path.join(os.path.dirname(__file__),
+                             'state-machine-describe-execution')
+            )),
+            handler='index.handler',
+            runtime=lbda.Runtime.NODEJS_8_10,
+            memory_size=1024,
+            timeout=core.Duration.seconds(200)
+        )
+        self.describe_execution_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=['states:DescribeExecution'],
+                resources=[
+                    scope.format_arn(
+                        service='states',
+                        resource='execution:' + self.state_machine.state_machine_name,
+                        resource_name='*',
+                        sep=':'
+                    )
+                ]
+            )
+        )
+
+        self.state_machine_name = self.state_machine.state_machine_name
+
+        self.describe_execution_policy = iam.PolicyStatement(
+            actions=['states:DescribeExecution'],
+            resources=[
+                scope.format_arn(
+                    service='states',
+                    resource='execution:' + self.state_machine_name,
+                    resource_name='*',
+                    sep=':'
+                )
+            ]
         )

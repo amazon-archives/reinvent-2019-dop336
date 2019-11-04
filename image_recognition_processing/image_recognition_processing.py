@@ -1,5 +1,4 @@
 import os.path
-import subprocess
 from state_machine import IdentifierStateMachine
 
 from aws_cdk import (
@@ -10,11 +9,7 @@ from aws_cdk import (
     aws_ecs_patterns as ecs_patterns,
     aws_ecr_assets as ecr_assets,
     aws_iam as iam,
-    aws_lambda as lbda,
-    aws_lambda_event_sources as event_sources,
-    aws_s3 as s3,
-    aws_stepfunctions as sfn,
-    aws_stepfunctions_tasks as tasks
+    aws_s3 as s3
 )
 
 
@@ -80,82 +75,15 @@ class ImageRecognitionProcessingStack(core.Stack):
             write_capacity=1
         )
 
-        extract_image_metadata_fn_dir = os.path.join(
-            os.path.dirname(__file__), 'extract-image-metadata')
-        detect_labels_fn_dir = os.path.join(
-            os.path.dirname(__file__), 'rekognition')
-        generate_thumbnails_fn_dir = os.path.join(
-            os.path.dirname(__file__), 'thumbnail')
-
-        for dir in (
-            extract_image_metadata_fn_dir,
-            detect_labels_fn_dir,
-            generate_thumbnails_fn_dir
-        ):
-            # Prepare npm package
-            subprocess.check_call(["npm", "install"], cwd=dir)
-
+        # Identifier state machine
         state_machine = IdentifierStateMachine(
             self,
             'StateMachine',
             photo_repo=photo_repo,
             image_metadata_table=image_metadata_table
-        ).state_machine
-
-        # Function to start image processing
-        start_execution_fn = lbda.Function(
-            self, 'StartExecution',
-            description='Triggered by S3 image upload to the repo bucket and start the image processing step function workflow',
-            code=lbda.AssetCode(os.path.join(
-                os.path.dirname(__file__), 'start-execution')),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            environment={
-                'STATE_MACHINE_ARN': state_machine.state_machine_arn,
-                'IMAGE_METADATA_DDB_TABLE': image_metadata_table.table_name
-            },
-            memory_size=256
         )
 
-        # Trigger process when the bucket is written to
-        start_execution_fn.add_event_source(
-            event_sources.S3EventSource(
-                photo_repo,
-                events=[
-                    s3.EventType.OBJECT_CREATED
-                ]
-            ))
-        # Allow start-processing function to write to image metadata table
-        image_metadata_table.grant_write_data(start_execution_fn)
-
-        # Allow start-processing function to invoke state machine
-        state_machine.grant_start_execution(start_execution_fn)
-
-        describe_execution_function = lbda.Function(
-            self, 'DescribeExecutionFunction',
-            code=lbda.AssetCode(os.path.join(
-                os.path.join(os.path.dirname(__file__),
-                             'state-machine-describe-execution')
-            )),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            memory_size=1024,
-            timeout=core.Duration.seconds(200)
-        )
-        describe_execution_function.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=['states:DescribeExecution'],
-                resources=[
-                    self.format_arn(
-                        service='states',
-                        resource='execution:' + state_machine.state_machine_name,
-                        resource_name='*',
-                        sep=':'
-                    )
-                ]
-            )
-        )
-
+        # Create IAM role associated with our (in)Cognito identity
         identity_pool_role = iam.Role(
             self, 'IdentityPoolRole',
             assumed_by=iam.FederatedPrincipal(
@@ -165,30 +93,21 @@ class ImageRecognitionProcessingStack(core.Stack):
             )
         )
 
-        identity_pool_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=['states:DescribeExecution'],
-                resources=[
-                    self.format_arn(
-                        service='states',
-                        resource='execution:' + state_machine.state_machine_name,
-                        resource_name='*',
-                        sep=':'
-                    )
-                ]
-            )
-        )
+        # Allow role to describe State Machine execution
+        identity_pool_role.add_to_policy(state_machine.describe_execution_policy)
 
+        # Also allow role to access photo repo, metadata tables, and
+        # to examine state machine executions
         photo_repo.grant_read_write(identity_pool_role)
         album_metadata_table.grant_read_write_data(identity_pool_role)
         image_metadata_table.grant_read_write_data(identity_pool_role)
-        describe_execution_function.grant_invoke(identity_pool_role)
+        state_machine.describe_execution_function.grant_invoke(identity_pool_role)
 
+        # Create the (in)Cognito Identity Pool
         identity_pool = cognito.CfnIdentityPool(
             self, 'IdentityPool',
             allow_unauthenticated_identities=True
         )
-        core.CfnOutput(self, 'identity_pool_id', value=identity_pool.ref)
         cognito.CfnIdentityPoolRoleAttachment(
             self, 'IdentityPoolRoleAttachment',
             identity_pool_id=identity_pool.ref,
@@ -215,14 +134,14 @@ class ImageRecognitionProcessingStack(core.Stack):
                     'COGNITO_IDENTITY_POOL': identity_pool.ref,
                     'IMAGE_METADATA_TABLE': image_metadata_table.table_name,
                     'PHOTO_REPO_S3_BUCKET': photo_repo.bucket_name,
-                    'DESCRIBE_EXECUTION_FUNCTION_NAME': describe_execution_function.function_name
+                    'DESCRIBE_EXECUTION_FUNCTION_NAME': state_machine.describe_execution_function.function_name
                 }
             )
         )
-
+        # Allow the app to start a State Machine execution
         app.task_definition.add_to_task_role_policy(
             iam.PolicyStatement(
                 actions=['lambda:InvokeFunction'],
-                resources=[start_execution_fn.function_arn]
+                resources=[state_machine.start_execution_fn.function_arn]
             )
         )
