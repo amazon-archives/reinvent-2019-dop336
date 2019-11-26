@@ -9,11 +9,11 @@ setuptools.setup(
     name="reinvent_dop336_2019",
     version="0.0.1",
 
-    description="Demo app for re:Invent 2019 DOP336",
+    description="An empty CDK Python app",
     long_description=long_description,
     long_description_content_type="text/markdown",
 
-    author="Michael Fischer <fiscmi@amazon.com>",
+    author="author",
 
     package_dir={"": "image_recognition_processing"},
     packages=setuptools.find_packages(where="image_recognition_processing"),
@@ -27,7 +27,8 @@ setuptools.setup(
         "aws-cdk.aws-stepfunctions-tasks",
         "aws-cdk.aws-ecs-patterns",
         "aws-cdk.aws-ecr-assets",
-        "aws-cdk.aws-cognito"
+        "aws-cdk.aws-cognito",
+        "cdk-watchful~=0.3.0"
     ],
 
     python_requires=">=3.6",

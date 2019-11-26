@@ -4,8 +4,7 @@ import subprocess
 from aws_cdk import (
     core,
     aws_dynamodb as dynamodb,
-    aws_lambda as lbda,
-    aws_lambda_event_sources as event_sources,
+    aws_lambda,
     aws_iam as iam,
     aws_s3 as s3,
     aws_stepfunctions as sfn,
@@ -30,15 +29,15 @@ class IdentifierStateMachine(core.Construct):
             generate_thumbnails_fn_dir
         ):
             # Prepare npm package
-            subprocess.check_call(["npm", "install"], cwd=dir)
+            subprocess.check_call(['npm', 'install'], cwd=dir)
 
         # Function to extract image metadata
-        extract_metadata_fn = lbda.Function(
+        extract_metadata_fn = aws_lambda.Function(
             self, 'ExtractImageMetadata',
             description='Extract image metadata such as format, size, geolocation, etc.',
-            code=lbda.Code.from_asset(extract_image_metadata_fn_dir),
+            code=aws_lambda.Code.from_asset(extract_image_metadata_fn_dir),
             handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
+            runtime=aws_lambda.Runtime.NODEJS_8_10,
             memory_size=1024,
             timeout=core.Duration.seconds(200)
         )
@@ -46,25 +45,25 @@ class IdentifierStateMachine(core.Construct):
         photo_repo.grant_read(extract_metadata_fn)
 
         # Function to transform image metadata
-        transform_metadata_fn = lbda.Function(
+        transform_metadata_fn = aws_lambda.Function(
             self, 'TransformImageMetadata',
             description='massages JSON of extracted image metadata',
-            code=lbda.Code.from_asset(os.path.join(
+            code=aws_lambda.Code.from_asset(os.path.join(
                 os.path.dirname(__file__), 'transform-metadata')),
             handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
+            runtime=aws_lambda.Runtime.NODEJS_8_10,
             memory_size=256,
             timeout=core.Duration.seconds(60)
         )
 
         # Function to store metadata in database
-        store_metadata_fn = lbda.Function(
+        store_metadata_fn = aws_lambda.Function(
             self, 'StoreImageMetadata',
             description='Store image metadata into database',
-            code=lbda.Code.from_asset(os.path.join(
+            code=aws_lambda.Code.from_asset(os.path.join(
                 os.path.dirname(__file__), 'store-image-metadata')),
             handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
+            runtime=aws_lambda.Runtime.NODEJS_8_10,
             environment={
                 'IMAGE_METADATA_DDB_TABLE': image_metadata_table.table_name
             },
@@ -75,12 +74,12 @@ class IdentifierStateMachine(core.Construct):
         image_metadata_table.grant_write_data(store_metadata_fn)
 
         # Invoke Rekognition to detect labels
-        detect_labels_fn = lbda.Function(
+        detect_labels_fn = aws_lambda.Function(
             self, 'DetectLabels',
             description='Use Amazon Rekognition to detect labels from image',
-            code=lbda.Code.from_asset(detect_labels_fn_dir),
+            code=aws_lambda.Code.from_asset(detect_labels_fn_dir),
             handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
+            runtime=aws_lambda.Runtime.NODEJS_8_10,
             memory_size=256,
             timeout=core.Duration.seconds(60)
         )
@@ -93,12 +92,12 @@ class IdentifierStateMachine(core.Construct):
         photo_repo.grant_read(detect_labels_fn)
 
         # Generate thumbnails
-        generate_thumbnails_fn = lbda.Function(
+        generate_thumbnails_fn = aws_lambda.Function(
             self, 'GenerateThumbnails',
             description='Generate thumbnails for images',
-            code=lbda.Code.from_asset(generate_thumbnails_fn_dir),
+            code=aws_lambda.Code.from_asset(generate_thumbnails_fn_dir),
             handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
+            runtime=aws_lambda.Runtime.NODEJS_8_10,
             memory_size=1536,
             timeout=core.Duration.minutes(5)
         )
@@ -198,43 +197,16 @@ class IdentifierStateMachine(core.Construct):
             )
         )
 
-       # Function to start image processing
-        self.start_execution_fn = lbda.Function(
-            self, 'StartExecution',
-            description='Triggered by S3 image upload to the repo bucket and start the image processing step function workflow',
-            code=lbda.Code.from_asset(os.path.join(
-                os.path.dirname(__file__), 'start-execution')),
-            handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
-            environment={
-                'STATE_MACHINE_ARN': self.state_machine.state_machine_arn,
-                'IMAGE_METADATA_DDB_TABLE': image_metadata_table.table_name
-            },
-            memory_size=256
-        )
 
-        # Trigger process when the bucket is written to
-        self.start_execution_fn.add_event_source(
-            event_sources.S3EventSource(
-                photo_repo,
-                events=[
-                    s3.EventType.OBJECT_CREATED
-                ]
-            ))
-        # Allow start-processing function to write to image metadata table
-        image_metadata_table.grant_write_data(self.start_execution_fn)
 
-        # Allow start-processing function to invoke state machine
-        self.state_machine.grant_start_execution(self.start_execution_fn)
-
-        self.describe_execution_function = lbda.Function(
+        self.describe_execution_function = aws_lambda.Function(
             self, 'DescribeExecutionFunction',
-            code=lbda.Code.from_asset(os.path.join(
+            code=aws_lambda.Code.from_asset(os.path.join(
                 os.path.join(os.path.dirname(__file__),
                              'state-machine-describe-execution')
             )),
             handler='index.handler',
-            runtime=lbda.Runtime.NODEJS_8_10,
+            runtime=aws_lambda.Runtime.NODEJS_8_10,
             memory_size=1024,
             timeout=core.Duration.seconds(200)
         )
@@ -252,6 +224,7 @@ class IdentifierStateMachine(core.Construct):
             )
         )
 
+        self.state_machine_arn = self.state_machine.state_machine_arn
         self.state_machine_name = self.state_machine.state_machine_name
 
         self.describe_execution_policy = iam.PolicyStatement(
@@ -265,3 +238,6 @@ class IdentifierStateMachine(core.Construct):
                 )
             ]
         )
+
+    def grant_start_execution(self, identity: iam.IGrantable) -> None:
+        self.state_machine.grant_start_execution(identity)

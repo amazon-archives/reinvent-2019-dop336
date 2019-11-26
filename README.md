@@ -1,9 +1,6 @@
 
-# Welcome to your CDK Python project!
-
-This is a blank project for Python development with CDK.
-
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+# Demo app for re:Invent 2019 - DOP336
+# Serverless app infrastructure with the AWS Cloud Development Kit (AWS CDK) 
 
 This project is set up like a standard Python project.  The initialization
 process also creates a virtualenv within this project, stored under the .env
@@ -37,7 +34,7 @@ Once the virtualenv is activated, you can install the required dependencies.
 $ pip install -r requirements.txt
 ```
 
-At this point you can now synthesize the CloudFormation template for this code.
+At this point you can now deploy the CloudFormation template for this code.
 
 ```
 $ cdk synth

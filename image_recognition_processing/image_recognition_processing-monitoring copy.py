@@ -1,5 +1,6 @@
 import os.path
 from state_machine import IdentifierStateMachine
+from cdk_watchful import Watchful
 
 from aws_cdk import (
     core,
@@ -18,6 +19,8 @@ from aws_cdk import (
 class ImageRecognitionProcessingStack(core.Stack):
     def __init__(self, scope: core.Construct, id: str, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
+
+        wf = Watchful(self, 'ImageRecognitionDashboard')
 
         # Bucket into which photos will be uploaded
         photo_repo = s3.Bucket(
@@ -57,6 +60,8 @@ class ImageRecognitionProcessingStack(core.Stack):
             write_capacity=3
         )
 
+        wf.watch_dynamo_table('Image Metadata Table', image_metadata_table)
+
         # Album metadata table
         album_metadata_table = dynamodb.Table(
             self, 'AlbumMetadata',
@@ -76,6 +81,8 @@ class ImageRecognitionProcessingStack(core.Stack):
             read_capacity=2,
             write_capacity=1
         )
+
+        wf.watch_dynamo_table('Album Metadata Table', album_metadata_table)
 
         # Identifier state machine
         state_machine = IdentifierStateMachine(
@@ -160,6 +167,7 @@ class ImageRecognitionProcessingStack(core.Stack):
             },
             memory_size=256
         )
+        wf.watch_lambda_function('Start Execution Function', start_execution_fn)
 
         # Trigger process when the bucket is written to
         start_execution_fn.add_event_source(
