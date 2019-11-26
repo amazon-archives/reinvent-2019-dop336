@@ -1,6 +1,13 @@
 
 # Demo app for re:Invent 2019 - DOP336
-# Serverless app infrastructure with the AWS Cloud Development Kit (AWS CDK) 
+# Serverless app infrastructure with the AWS Cloud Development Kit (AWS CDK)
+
+## CDK installation
+
+If you haven't done so already, you need to install CDK.  This requires that NodeJS be installed.
+Version 10 or later of NodeJS is supported.  Run `npm install -g aws-cdk` to install it.
+
+## Set up virtualenv
 
 This project is set up like a standard Python project.  The initialization
 process also creates a virtualenv within this project, stored under the .env
@@ -27,6 +34,8 @@ If you are a Windows platform, you would activate the virtualenv like this:
 ```
 % .env\Scripts\activate.bat
 ```
+
+## Install Python packages
 
 Once the virtualenv is activated, you can install the required dependencies.
 
